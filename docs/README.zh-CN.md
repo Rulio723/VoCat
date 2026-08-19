@@ -92,6 +92,13 @@ sudo bash install.sh 0.0.2
 
 VoWiFi IMS 必须使用 Linux XFRM/IPsec。OpenWrt/Kwrt 上安装脚本会从当前固件自己的软件源尝试安装严格匹配的 `ip-full`、`kmod-ipsec`、`kmod-ipsec4/6`、`kmod-crypto-authenc`、AES-CBC 和 SHA1 组件。若软件源没有与当前内核匹配的模块，必须更换包含这些组件的固件，禁止强装其他内核版本的 kmod。
 
+如果你的内核确实无法提供 XFRM/IPsec，且仅需要非 VoWiFi 功能（蜂窝短信、数据等），可在安装时加上 `--skip-vowifi-check`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh -o install.sh
+sudo bash install.sh --skip-vowifi-check
+```
+
 安装程序会:
 
 - 检测 `amd64`、`386`、`arm64` 或 `armv7` 架构;
@@ -167,6 +174,11 @@ docker run -d \
 该模式有意赋予 Vocat 对主机设备与网络栈的广泛访问权限,仅在受信任的 Linux 主机上使用。自动发现目前仅识别受支持的 Quectel USB 模组(USB 厂商 ID `2c7c`),不识别任意品牌的模组。仅用 `--device` 映射单个节点(例如 `/dev/ttyUSB2` 与 `/dev/cdc-wdm0`)会将容器限定在这些固定节点上,无法提供完整的多设备或热插拔发现。
 
 GHCR 镜像发布为 `linux/amd64` 与 `linux/arm64`。
+
+> [!TIP]
+> **NAS / 威联通 (QNAP Container Station) 部署说明**：
+> 在威联通等 NAS 系统的 Container Station 下部署时，由于系统的非 Root 自定义管理员权限与卷隔离机制，使用 Docker 命名卷（如 `-v vocat-data:/opt/vocat/data`）在执行一次性初始化 `bootstrap-admin` 和启动常驻服务时，两者的卷极易被解析至不同的隔离路径，导致 Web 端登录时提示密码错误。
+> 建议在 NAS 环境下部署时，将 `-v vocat-data:/opt/vocat/data` 替换为宿主机的绝对路径挂载（例如威联通上的 `-v /share/Container/vocat/data:/opt/vocat/data`），以确保初始化与运行期读写同一个 SQLite 数据库文件。
 
 ### USB SIM 读卡器
 

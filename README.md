@@ -96,6 +96,14 @@ to install matching `ip-full`, `kmod-ipsec`, `kmod-ipsec4/6`,
 If matching kernel modules are unavailable, use a firmware that includes them;
 never force-install kmods built for a different kernel.
 
+If your kernel cannot provide XFRM/IPsec and you only need non-VoWiFi features
+such as cellular SMS or data, install with `--skip-vowifi-check`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh -o install.sh
+sudo bash install.sh --skip-vowifi-check
+```
+
 The installer:
 
 - detects `amd64`, `386`, `arm64`, `aarch64`, or `armv7`;
@@ -187,6 +195,11 @@ modem layouts. Mapping only individual nodes with `--device`, such as
 those fixed nodes and does not provide complete multi-device or hot-plug discovery.
 
 The GHCR image is published for `linux/amd64` and `linux/arm64`.
+
+> [!TIP]
+> **NAS / QNAP Container Station Deployment Note**:
+> On NAS operating systems like QNAP QTS / QuTS hero (Container Station), custom non-root administrator accounts and volume isolation mechanisms may cause Docker named volumes (e.g. `-v vocat-data:/opt/vocat/data`) to resolve to different isolated paths between the one-off `bootstrap-admin` initialization and the daemon service container, leading to "Incorrect password" errors during Web login.
+> For NAS environments, it is strongly recommended to replace named volumes with a host absolute path bind mount (e.g. `-v /share/Container/vocat/data:/opt/vocat/data` on QNAP) for both initialization and runtime to guarantee consistent SQLite database persistence.
 
 ### USB SIM readers
 
