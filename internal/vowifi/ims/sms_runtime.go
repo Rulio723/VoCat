@@ -56,7 +56,6 @@ type ReceivedSMS struct {
 	RawTPDU                string
 	DecodeError            string
 }
-
 // ReceivedSMSStatus is network delivery evidence for one submitted SMS part.
 type ReceivedSMSStatus struct {
 	DeviceID               string
@@ -891,10 +890,8 @@ func (session *Session) parseUSSIReply(response *sipResponse) (string, *int) {
 }
 
 func (session *Session) ussiTarget() string {
-	if number, _, ok := vowifi.ExtractAssociatedMSISDN(session.evidence); ok {
-		if normalized := normalizeE164(number); normalized != "" {
-			return "tel:" + normalized
-		}
+	if domain := strings.TrimSpace(session.identity.domain); domain != "" {
+		return "sip:" + domain
 	}
 	return session.identity.public
 }
@@ -1063,6 +1060,9 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 }
 
 func smsCenterForIdentity(config Config, identity vowifi.SIMIdentity) string {
+	if identitySMSC := strings.TrimSpace(identity.SMSC); identitySMSC != "" {
+		return identitySMSC
+	}
 	plmn := strings.TrimSpace(identity.HomeMCC) + strings.TrimSpace(identity.HomeMNC)
 	if configured := strings.TrimSpace(config.SMSCenterByPLMN[plmn]); configured != "" {
 		return configured

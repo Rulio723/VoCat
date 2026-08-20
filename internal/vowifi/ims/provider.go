@@ -70,9 +70,21 @@ type Config struct {
 	// IMS (3GPP TS 24.390). Returning an error is logged but does not affect
 	// the 200 OK already sent, because USSI has no RP-ACK transport.
 	OnUSSD func(context.Context, ReceivedUSSD) error
+	// OnIncomingCall is invoked when an incoming voice call (INVITE) is received over IMS.
+	OnIncomingCall func(context.Context, ReceivedCall) error
 	// Logger receives structured IMS runtime diagnostics. Inbound SMS logs do
 	// not include message text or raw protocol payloads.
 	Logger *slog.Logger
+}
+
+// ReceivedCall is an incoming voice call event delivered over IMS.
+type ReceivedCall struct {
+	DeviceID  string
+	IMSI      string
+	CallID    string
+	Caller    string
+	Called    string
+	Timestamp time.Time
 }
 
 // Provider implements vowifi.IMSProvider using a small RFC 3261 REGISTER
@@ -218,99 +230,109 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 	if err != nil {
 		return nil, err
 	}
-	pcscf := provider.config.PCSCF
-	if pcscf == "" {
+	var pcscfCandidates []string
+	if provider.config.PCSCF != "" {
+		pcscfCandidates = []string{provider.config.PCSCF}
+	} else {
 		for _, candidate := range tunnel.PCSCF {
-			if strings.TrimSpace(candidate) != "" {
-				pcscf = candidate
-				break
+			candidate = strings.TrimSpace(candidate)
+			if candidate != "" {
+				pcscfCandidates = append(pcscfCandidates, candidate)
 			}
 		}
 	}
-	if pcscf == "" {
+	if len(pcscfCandidates) == 0 {
 		return nil, errors.New("ims: tunnel did not provide a P-CSCF")
 	}
-	endpoint, transportHint, err := parsePCSCF(pcscf, provider.config.Port)
-	if err != nil {
-		return nil, err
-	}
-	if provider.config.PCSCF != "" && !pcscfProvenByTunnel(endpoint, tunnel.PCSCF, provider.config.Port) {
-		return nil, errors.New("ims: configured P-CSCF is not proven by the SWu tunnel")
-	}
-	transport, carrierSelected := carrierTransportForIdentity(provider.config, request.Identity)
-	if cached := provider.cachedTransport(request.Identity); cached != "" {
-		transport = cached
-		carrierSelected = true
-	}
-	if transport == "" && !carrierSelected {
-		transport = transportHint
-	}
-	if transport == "" {
-		transport = provider.config.Transport
-	}
-	if transport == "" {
-		transport = "tcp"
-	}
-	localAddress := provider.config.LocalAddress
-	if localAddress == "" {
-		if endpointIP := net.ParseIP(endpoint.host); endpointIP != nil && endpointIP.To4() == nil {
-			localAddress = tunnel.LocalIPv6
-		} else {
-			localAddress = tunnel.LocalIPv4
-			if strings.TrimSpace(localAddress) == "" {
-				localAddress = tunnel.LocalIPv6
-			}
-		}
-	}
-	localAddress = strings.TrimSpace(strings.Split(localAddress, "/")[0])
-	if localAddress == "" {
-		return nil, errors.New("ims: tunnel did not provide a local address")
-	}
-	if !localAddressProvenByTunnel(localAddress, tunnel) {
-		return nil, errors.New("ims: configured local address is not assigned by the SWu tunnel")
-	}
 
-	transports := []string{transport}
-	if provider.config.AutoTransportFallback {
-		alternate := "udp"
-		if transport == "udp" {
-			alternate = "tcp"
-		}
-		transports = append(transports, alternate)
-	}
 	var lastErr error
-	for attempt, candidate := range transports {
-		connection, dialErr := dialSIP(ctx, candidate, localAddress, 0, endpoint.address())
-		if dialErr != nil {
-			lastErr = fmt.Errorf("ims: connect to P-CSCF over %s: %w", candidate, dialErr)
-			if attempt+1 < len(transports) && ctx.Err() == nil {
-				provider.logTransportFallback(request.Identity, candidate, transports[attempt+1], lastErr)
-				continue
+	for pcscfIndex, pcscf := range pcscfCandidates {
+		endpoint, transportHint, err := parsePCSCF(pcscf, provider.config.Port)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if provider.config.PCSCF != "" && !pcscfProvenByTunnel(endpoint, tunnel.PCSCF, provider.config.Port) {
+			return nil, errors.New("ims: configured P-CSCF is not proven by the SWu tunnel")
+		}
+		transport, carrierSelected := carrierTransportForIdentity(provider.config, request.Identity)
+		if cached := provider.cachedTransport(request.Identity); cached != "" {
+			transport = cached
+			carrierSelected = true
+		}
+		if transport == "" && !carrierSelected {
+			transport = transportHint
+		}
+		if transport == "" {
+			transport = provider.config.Transport
+		}
+		if transport == "" {
+			transport = "tcp"
+		}
+		localAddress := provider.config.LocalAddress
+		if localAddress == "" {
+			if endpointIP := net.ParseIP(endpoint.host); endpointIP != nil && endpointIP.To4() == nil {
+				localAddress = tunnel.LocalIPv6
+			} else {
+				localAddress = tunnel.LocalIPv4
+				if strings.TrimSpace(localAddress) == "" {
+					localAddress = tunnel.LocalIPv6
+				}
 			}
-			return nil, lastErr
 		}
-		session, sessionErr := newSession(provider, request, identities, endpoint, candidate, connection)
-		if sessionErr != nil {
-			_ = connection.Close()
-			return nil, sessionErr
+		localAddress = strings.TrimSpace(strings.Split(localAddress, "/")[0])
+		if localAddress == "" {
+			return nil, errors.New("ims: tunnel did not provide a local address")
 		}
-		establishErr := session.establish(ctx)
-		if establishErr == nil {
-			provider.rememberTransport(request.Identity, candidate)
-			if attempt > 0 {
-				provider.config.Logger.Info("IMS automatic transport fallback succeeded",
-					"carrier_profile", vowifi.ResolveCarrierProfile(request.Identity).ID,
-					"transport", candidate)
+		if !localAddressProvenByTunnel(localAddress, tunnel) {
+			return nil, errors.New("ims: configured local address is not assigned by the SWu tunnel")
+		}
+
+		transports := []string{transport}
+		if provider.config.AutoTransportFallback {
+			alternate := "udp"
+			if transport == "udp" {
+				alternate = "tcp"
 			}
-			return session, nil
+			transports = append(transports, alternate)
 		}
-		sipResponseObserved := session.evidence.LastSIPCode != 0
-		session.abort()
-		lastErr = establishErr
-		if sipResponseObserved || attempt+1 >= len(transports) || ctx.Err() != nil {
-			return nil, lastErr
+		for attempt, candidate := range transports {
+			connection, dialErr := dialSIP(ctx, candidate, localAddress, 0, endpoint.address())
+			if dialErr != nil {
+				lastErr = fmt.Errorf("ims: connect to P-CSCF over %s: %w", candidate, dialErr)
+				if attempt+1 < len(transports) && ctx.Err() == nil {
+					provider.logTransportFallback(request.Identity, candidate, transports[attempt+1], lastErr)
+					continue
+				}
+				break
+			}
+			session, sessionErr := newSession(provider, request, identities, endpoint, candidate, connection)
+			if sessionErr != nil {
+				_ = connection.Close()
+				lastErr = sessionErr
+				break
+			}
+			establishErr := session.establish(ctx)
+			if establishErr == nil {
+				provider.rememberTransport(request.Identity, candidate)
+				if attempt > 0 || pcscfIndex > 0 {
+					provider.config.Logger.Info("IMS automatic transport fallback succeeded",
+						"carrier_profile", vowifi.ResolveCarrierProfile(request.Identity).ID,
+						"transport", candidate)
+				}
+				return session, nil
+			}
+			sipResponseObserved := session.evidence.LastSIPCode != 0
+			session.abort()
+			lastErr = establishErr
+			if sipResponseObserved || attempt+1 >= len(transports) || ctx.Err() != nil {
+				break
+			}
+			provider.logTransportFallback(request.Identity, candidate, transports[attempt+1], establishErr)
 		}
-		provider.logTransportFallback(request.Identity, candidate, transports[attempt+1], establishErr)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 	}
 	return nil, lastErr
 }
@@ -372,8 +394,13 @@ func deriveIdentities(identity vowifi.SIMIdentity, config Config) (identitySet, 
 	if !digitsBetween(imsi, 5, 16) {
 		return identitySet{}, errors.New("ims: SIM IMSI is unavailable or invalid")
 	}
-	mcc := strings.TrimSpace(identity.HomeMCC)
-	mnc := strings.TrimSpace(identity.HomeMNC)
+	profile := vowifi.ResolveCarrierProfile(identity)
+	mcc := strings.TrimSpace(profile.RouteMCC)
+	mnc := strings.TrimSpace(profile.RouteMNC)
+	if mcc == "" || mnc == "" {
+		mcc = strings.TrimSpace(identity.HomeMCC)
+		mnc = strings.TrimSpace(identity.HomeMNC)
+	}
 	if !digitsBetween(mcc, 3, 3) || !digitsBetween(mnc, 2, 3) {
 		return identitySet{}, errors.New("ims: home PLMN is unavailable or invalid")
 	}
@@ -383,7 +410,7 @@ func deriveIdentities(identity vowifi.SIMIdentity, config Config) (identitySet, 
 	domain := fmt.Sprintf("ims.mnc%s.mcc%s.3gppnetwork.org", mnc, mcc)
 	privateDomain := domain
 	publicDomain := domain
-	if vowifi.ResolveCarrierProfile(identity).IMSIdentityProfile == vowifi.IMSProfileATT {
+	if profile.IMSIdentityProfile == vowifi.IMSProfileATT {
 		// AT&T provisions the IMPI and IMPU in its ISIM domains rather than
 		// the generic 3GPP PLMN IMS domain.
 		domain = "one.att.net"
@@ -964,19 +991,17 @@ func (session *Session) buildRegister(
 	}
 	lines = append(lines, "User-Agent: "+userAgent)
 
-	defaultPANI := "IEEE-802.11;i-wlan-node-id=000000000000;network-provided"
-	pani := defaultPANI
-	if registerOptions.PAccessNetworkInfo != nil {
-		pani = *registerOptions.PAccessNetworkInfo
-	}
-
 	if registerOptions.PPreferredIdentity {
 		lines = append(lines, "P-Preferred-Identity: <"+session.identity.public+">")
 	}
 	if value := strings.TrimSpace(registerOptions.PVisitedNetworkID); value != "" {
 		lines = append(lines, `P-Visited-Network-ID: "`+value+`"`)
 	}
-	if pani != "" {
+	// PANI carries access/location information and must not be fabricated.
+	// In particular, "network-provided" identifies a value inserted by a
+	// trusted network proxy, not one generated by this UE.  Send the header
+	// only when a carrier profile explicitly supplies a reviewed value.
+	if pani := optionalRegisterHeader(registerOptions.PAccessNetworkInfo); pani != "" {
 		lines = append(lines, "P-Access-Network-Info: "+pani)
 	}
 	if value := strings.TrimSpace(registerOptions.CellularNetworkInfo); value != "" {
@@ -1018,6 +1043,13 @@ func (session *Session) buildRegister(
 	}
 	lines = append(lines, "Content-Length: 0", "", "")
 	return []byte(strings.Join(lines, "\r\n")), nil
+}
+
+func optionalRegisterHeader(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
 }
 
 func (session *Session) buildContact(contactAddress string, registerOptions vowifi.IMSRegisterOptions) string {

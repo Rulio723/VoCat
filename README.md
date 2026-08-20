@@ -216,7 +216,8 @@ VoCat uses `qmicli` to verify that a QMI control channel is ready and
 `qmi-network` to manage packet-data sessions. The one-click installer installs
 and verifies the corresponding utilities automatically. For manual deployment,
 Debian/Ubuntu uses `apt install libqmi-utils`; Arch Linux uses
-`pacman -S libqmi`, and Alpine uses `apk add qmi-utils`.
+`pacman -S libqmi`, Alpine uses `apk add qmi-utils`, and OpenWrt uses
+`opkg install qmi-utils`.
 
 `vocat doctor --repair-dji-qmi` checks for `qmicli` before changing any USB
 driver binding or asserting DTR. If the utility is unavailable, the command
@@ -369,7 +370,7 @@ cd web && npm run build
 ## Thanks
 - [Nodeseek.com](https://www.nodeseek.com) — A community dedicated to servers
 - [Linux.do](https://linux.do) — An inspiring tech community
-- [iniwex5](https://github.com/iniwex5) - Style and Functionality Guidelines
+- [iniwex5](https://github.com/iniwex5) — Style and Functionality Guidelines
 
 ## Buy me a coffee
 
