@@ -496,26 +496,7 @@ func restoreConfiguredCellularData(
 		if err != nil {
 			continue
 		}
-		networkRequest := device.NetworkRequest{
-			Enabled: true, APN: config.APN, IPVersion: "IPV4V6", Backend: config.DeviceBackend,
-		}
-		if entry.Snapshot != nil {
-			iccid := strings.TrimSpace(entry.Snapshot.ICCID)
-			if policy, policyErr := database.CardPolicy(ctx, iccid); policyErr == nil {
-				networkRequest.APN = policy.APN
-				if policy.IPVersion != "" {
-					networkRequest.IPVersion = policy.IPVersion
-				}
-				if profile, profileErr := database.CardAPNProfileByAPN(ctx, iccid, policy.APN, policy.IPVersion); profileErr == nil {
-					networkRequest.Username = profile.Username
-					networkRequest.Password = profile.Password
-					networkRequest.Authentication = profile.AuthType
-					if entry.Snapshot.RegistrationStatus == 5 && profile.RoamingIPVersion != "" {
-						networkRequest.IPVersion = profile.RoamingIPVersion
-					}
-				}
-			}
-		}
+		networkRequest := configuredCellularNetworkRequest(ctx, database, config, entry.Snapshot)
 		dataContext, cancel := context.WithTimeout(ctx, 60*time.Second)
 		_, err = manager.SetNetwork(dataContext, entry.ID, networkRequest)
 		cancel()
@@ -525,6 +506,40 @@ func restoreConfiguredCellularData(
 		}
 		logger.Info("restored protected cellular data route", "device_id", config.ID, "interface", config.Interface)
 	}
+}
+
+func configuredCellularNetworkRequest(
+	ctx context.Context,
+	database *store.Store,
+	config store.Device,
+	snapshot *device.Snapshot,
+) device.NetworkRequest {
+	request := device.NetworkRequest{
+		Enabled: true, APN: config.APN, IPVersion: "IPV4V6", Backend: config.DeviceBackend,
+	}
+	if snapshot == nil {
+		return request
+	}
+	iccid := strings.TrimSpace(snapshot.ICCID)
+	policy, err := database.CardPolicy(ctx, iccid)
+	if err != nil {
+		return request
+	}
+	request.APN = policy.APN
+	if policy.IPVersion != "" {
+		request.IPVersion = policy.IPVersion
+	}
+	profile, err := database.CardAPNProfileByAPN(ctx, iccid, policy.APN, policy.IPVersion)
+	if err != nil {
+		return request
+	}
+	request.Username = profile.Username
+	request.Password = profile.Password
+	request.Authentication = profile.AuthType
+	if snapshot.RegistrationStatus == 5 && profile.RoamingIPVersion != "" {
+		request.IPVersion = profile.RoamingIPVersion
+	}
+	return request
 }
 
 func disableAllDeveloperCellularData(
@@ -684,7 +699,18 @@ func configureVoWiFiRuntime(
 					)
 				}
 			}
-			if _, err := manager.RequestEnabled(deviceConfig.ID, true); err != nil {
+			requestEnable := func() error {
+				_, requestErr := manager.RequestEnabled(deviceConfig.ID, true)
+				return requestErr
+			}
+			if err := requestVoWiFiStartup(
+				ctx,
+				logger,
+				deviceConfig.DeviceType,
+				deviceConfig.ID,
+				wifi410VoWiFiStartupDelay,
+				requestEnable,
+			); err != nil {
 				_ = manager.Close(context.Background())
 				return nil, fmt.Errorf("start device %q VoWiFi policy: %w", deviceConfig.ID, err)
 			}
@@ -696,7 +722,54 @@ func configureVoWiFiRuntime(
 const (
 	vowifiStartupRadioAttempts = 3
 	vowifiStartupRadioDelay    = time.Second
+	wifi410VoWiFiStartupDelay  = 80 * time.Second
 )
+
+// requestVoWiFiStartup delays only the persisted startup policy for OpenStick
+// 410 devices. Their Qualcomm UIM and Vodafone ePDG path need a short quiet
+// period after a cold boot; user-triggered reconnects and every other device
+// type continue to execute immediately.
+func requestVoWiFiStartup(
+	ctx context.Context,
+	logger *slog.Logger,
+	deviceType string,
+	deviceID string,
+	delay time.Duration,
+	request func() error,
+) error {
+	if deviceType != store.DeviceTypeWiFi410 || delay <= 0 {
+		return request()
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Info(
+		"OpenStick 410 VoWiFi startup delayed",
+		"device_id", deviceID,
+		"delay", delay,
+	)
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if err := request(); err != nil {
+			logger.Warn(
+				"OpenStick 410 delayed VoWiFi startup failed",
+				"device_id", deviceID,
+				"error", err,
+			)
+		}
+	}()
+	return nil
+}
+
+func shouldDelayWiFi410VoWiFi(deviceType string, now, notBefore time.Time) bool {
+	return deviceType == store.DeviceTypeWiFi410 && now.Before(notBefore)
+}
 
 type flightModeSetter interface {
 	SetFlight(context.Context, string, bool) (device.FlightResult, error)
@@ -1103,7 +1176,7 @@ func enforceDefaultSafeCardPolicy(
 	}
 	if err := database.UpsertCardPolicy(ctx, store.CardPolicy{
 		ICCID: iccid, VoWiFiEnabled: true, AirplaneEnabled: true,
-		IPVersion: "IPV4V6", Source: "default",
+		IPVersion: "IPV4V6", Source: "default", CellularIMSManaged: true,
 	}); err != nil {
 		logger.Warn("default card policy: persist policy", "iccid", iccid, "error", err)
 		return
@@ -1136,6 +1209,10 @@ func reconcileCardPolicies(
 	vowifiManager *vowifiruntime.Manager,
 ) {
 	observedCards := make(map[string]string)
+	wifi410StartupNotBefore := time.Now().Add(wifi410VoWiFiStartupDelay)
+	imsApplied := make(map[string]string)
+	imsRetryAfter := make(map[string]time.Time)
+	imsDataRestorePending := make(map[string]bool)
 	reconcile := func() {
 		policies, policyListErr := database.ListCardPolicies(ctx)
 		if policyListErr == nil {
@@ -1182,6 +1259,38 @@ func reconcileCardPolicies(
 			if policyErr != nil {
 				continue
 			}
+			imsKey := fmt.Sprintf("%s:%t", iccid, policy.CellularIMSEnabled)
+			if policy.CellularIMSManaged && imsApplied[config.ID] != imsKey && !time.Now().Before(imsRetryAfter[config.ID]) {
+				imsContext, cancelIMS := context.WithTimeout(ctx, 45*time.Second)
+				status, imsErr := manager.SetCellularIMS(imsContext, entry.ID, policy.CellularIMSEnabled)
+				cancelIMS()
+				if imsErr != nil {
+					imsRetryAfter[config.ID] = time.Now().Add(time.Minute)
+					logger.Warn("reconcile cellular IMS policy failed", "device_id", config.ID, "iccid", iccid, "error", imsErr)
+				} else {
+					imsApplied[config.ID] = imsKey
+					delete(imsRetryAfter, config.ID)
+					logger.Info("reconciled cellular IMS policy", "device_id", config.ID, "iccid", iccid,
+						"enabled", policy.CellularIMSEnabled, "registered", status.Registered,
+						"changed", status.Changed, "rebooting", status.Rebooting)
+					if status.Rebooting {
+						imsDataRestorePending[config.ID] = config.NetworkEnabled && !config.VoWiFiEnabled
+						continue
+					}
+				}
+			}
+			if imsDataRestorePending[config.ID] && config.NetworkEnabled && !policy.VoWiFiEnabled && entry.Snapshot.PSAttached {
+				request := configuredCellularNetworkRequest(ctx, database, config, entry.Snapshot)
+				restoreContext, cancelRestore := context.WithTimeout(ctx, 60*time.Second)
+				_, restoreErr := manager.SetNetwork(restoreContext, entry.ID, request)
+				cancelRestore()
+				if restoreErr != nil {
+					logger.Warn("reconcile cellular data after IMS reboot failed", "device_id", config.ID, "error", restoreErr)
+					continue
+				}
+				delete(imsDataRestorePending, config.ID)
+				logger.Info("restored cellular data after reconciled IMS reboot", "device_id", config.ID, "interface", config.Interface)
+			}
 			if policy.VoWiFiEnabled && (!policy.AirplaneEnabled || policy.NetworkEnabled) {
 				policy.AirplaneEnabled = true
 				policy.NetworkEnabled = false
@@ -1217,6 +1326,9 @@ func reconcileCardPolicies(
 				}
 				switch {
 				case stateErr != nil || !state.Enabled:
+					if shouldDelayWiFi410VoWiFi(config.DeviceType, time.Now(), wifi410StartupNotBefore) {
+						continue
+					}
 					_, _ = vowifiManager.RequestEnabled(config.ID, true)
 				case state.ICCID != "" && !strings.EqualFold(strings.TrimSpace(state.ICCID), iccid):
 					_, _ = vowifiManager.RequestReconnect(config.ID)
