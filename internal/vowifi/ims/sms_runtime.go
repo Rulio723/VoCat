@@ -950,11 +950,16 @@ func (session *Session) sendDeliveryReport(request *sipRequest, report []byte) e
 	if target == "" {
 		return errors.New("ims: SMS MESSAGE omitted a delivery-report target")
 	}
-	response, err := session.sendSIPMessage(
+	// TS 24.341 5.3.2.4 uses a public identity of the SMS receiver.
+	// Prefer the called identity only if the registrar associated it with us.
+	response, err := session.sendSIPMessageWithIdentity(
 		context.Background(),
 		target,
 		report,
 		strings.TrimSpace(request.value("Call-ID")),
+		smsContentType,
+		"smsip",
+		request.value("P-Called-Party-ID"),
 	)
 	if err != nil {
 		return err
@@ -972,6 +977,9 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 	session.smsMu.Lock()
 	defer session.smsMu.Unlock()
 
+	if err := ctx.Err(); err != nil {
+		return vowifi.SMSSubmitResult{}, err
+	}
 	session.mu.Lock()
 	if session.closed || !session.evidence.Registered || !session.smsCapabilityReady() {
 		session.mu.Unlock()
@@ -986,6 +994,12 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 		var readErr error
 		if ok {
 			smsc, readErr = reader.ReadSMSCenter(ctx, session.request.DeviceID)
+		}
+		if err := ctx.Err(); err != nil {
+			return vowifi.SMSSubmitResult{}, err
+		}
+		if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
+			return vowifi.SMSSubmitResult{}, readErr
 		}
 		if strings.TrimSpace(smsc) == "" {
 			smsc = smsCenterForIdentity(session.provider.config, session.request.Identity)
@@ -1019,8 +1033,27 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 	session.logOutboundSMS(slog.LevelInfo, "IMS outbound SMS submission started",
 		"stage", "prepare", "parts", len(parts), "smsc_source", smscSource,
 		"recipient_type", smsRecipientType(parts[0].To))
-	psi := "tel:" + normalizeE164(smsc)
+	psi, err := session.smsTarget(ctx, smsc)
+	if err != nil {
+		result.SubmissionStatus = "failed"
+		return result, err
+	}
+	// Preflight before attempting any part. The MESSAGE builder rechecks the
+	// current registration evidence under mu immediately before constructing it.
+	session.mu.Lock()
+	if session.identity.temporaryPublic {
+		_, _, err = originatingSMSPublicIdentity(session.identity.public, session.evidence.AssociatedIdentities)
+	}
+	session.mu.Unlock()
+	if err != nil {
+		result.SubmissionStatus = "failed"
+		return result, err
+	}
 	for _, part := range parts {
+		if err := ctx.Err(); err != nil {
+			result.SubmissionStatus = "failed"
+			return result, err
+		}
 		reference := session.allocateRPReference()
 		if len(part.TPDU) < 2 {
 			return result, errors.New("ims: SMS-SUBMIT TPDU is truncated")
@@ -1139,6 +1172,18 @@ func (session *Session) sendSIPMessageWith(
 	contentType string,
 	acceptContactTag string,
 ) (*sipResponse, error) {
+	return session.sendSIPMessageWithIdentity(ctx, target, body, inReplyTo, contentType, acceptContactTag, "")
+}
+
+func (session *Session) sendSIPMessageWithIdentity(
+	ctx context.Context,
+	target string,
+	body []byte,
+	inReplyTo string,
+	contentType string,
+	acceptContactTag string,
+	preferredIdentity string,
+) (*sipResponse, error) {
 	callToken, err := randomHex(18)
 	if err != nil {
 		return nil, err
@@ -1151,6 +1196,16 @@ func (session *Session) sendSIPMessageWith(
 	session.mu.Lock()
 	cseq := session.cseq
 	session.cseq++
+	var identity, identitySource string
+	if session.identity.temporaryPublic && contentType == smsContentType && inReplyTo == "" {
+		identity, identitySource, err = originatingSMSPublicIdentity(session.identity.public, session.evidence.AssociatedIdentities)
+		if err != nil {
+			session.mu.Unlock()
+			return nil, err
+		}
+	} else {
+		identity, identitySource = messagePublicIdentity(session.identity.public, preferredIdentity, session.evidence.AssociatedIdentities)
+	}
 	serviceRoutes := append([]string(nil), session.evidence.ServiceRoute...)
 	securityHeaders := runtimeSecurityHeaders(
 		session.securityActive,
@@ -1172,11 +1227,11 @@ func (session *Session) sendSIPMessageWith(
 		}
 	}
 	lines = append(lines,
-		"From: <"+session.identity.public+">;tag="+session.fromTag,
+		"From: <"+identity+">;tag="+session.fromTag,
 		"To: <"+target+">",
 		"Call-ID: "+callID,
 		fmt.Sprintf("CSeq: %d MESSAGE", cseq),
-		"P-Preferred-Identity: <"+session.identity.public+">",
+		"P-Preferred-Identity: <"+identity+">",
 	)
 	if pani := session.pAccessNetworkInfo(); pani != "" {
 		lines = append(lines, "P-Access-Network-Info: "+pani)
@@ -1201,6 +1256,7 @@ func (session *Session) sendSIPMessageWith(
 	request := append([]byte(strings.Join(lines, "\r\n")), body...)
 	session.logOutboundSMS(slog.LevelDebug, "IMS SIP MESSAGE transaction started",
 		"stage", "sip_send", "call_id", callID, "cseq", cseq,
+		"identity_source", identitySource,
 		"body_bytes", len(body), "service_routes", len(serviceRoutes))
 	response, exchangeErr := session.exchangeRuntime(
 		ctx,
