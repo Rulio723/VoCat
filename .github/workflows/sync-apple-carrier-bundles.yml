@@ -1,9 +1,7 @@
 name: Sync Apple Carrier Bundles
 
 on:
-  schedule:
-    # Run every Sunday at midnight UTC
-    - cron: '0 0 * * 0'
+  # Disabled automatically on this mirror fork; run manually if needed.
   workflow_dispatch:
 
 permissions:
