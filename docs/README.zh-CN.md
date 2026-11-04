@@ -24,7 +24,7 @@
 
 [English](../README.md) | [العربية](README.ar.md) | **简体中文** | [繁體中文](README.zh-TW.md) | [Français](README.fr.md) | [Русский](README.ru.md) | [Español](README.es.md) | [日本語](README.ja.md)
 
-Vocat 是一款面向 Quectel EC20/EC25 系列蜂窝模组的开源 Web 控制面板与工程工具套件。它在一个自包含的服务中整合了模组发现、实时射频状态、AT 与 USSD 终端、短信、WiFi Calling（WiFi 通话）、eSIM 管理、网络选择、代理路由、通知、审计日志以及发布自动化。
+Vocat 是一款面向 Quectel EC20/EC25 系列与中移物联 ML307 系列蜂窝模组的开源 Web 控制面板与工程工具套件。它在一个自包含的服务中整合了模组发现、实时射频状态、AT 与 USSD 终端、短信、WiFi Calling（WiFi 通话）、eSIM 管理、网络选择、代理路由、通知、审计日志以及发布自动化。
 
 后端使用 Go 编写，界面采用 React 与 TypeScript 构建，生产环境前端被嵌入进 Go 二进制中。单个可执行文件即包含完整的 Web 应用，并使用 SQLite 进行持久化存储。
 
@@ -38,7 +38,7 @@ Vocat 是一款面向 Quectel EC20/EC25 系列蜂窝模组的开源 Web 控制�
 | 领域 | Vocat 提供的能力 |
 | --- | --- |
 | 设备管理 | 自动串口/USB 发现、多模组支持、设备友好名称、概览实时刷新、模组重启、飞行模式以及 USB 网卡模式控制。 |
-| 射频与网络 | 注册状态、运营商、信号指标、RSRP/RSRQ/SINR、网络模式、频段、信道、运营商扫描以及自动/手动选网。 |
+| 射频与网络 | 注册状态、运营商、信号指标、RSRP/RSRQ/SINR、网络模式、频段、信道、运营商扫描、自动/手动选网，以及 LTE 小区查询与单小区锁定/解锁（EARFCN/PCI）。 |
 | AT 与 USSD | 交互式 AT 终端、命令历史、原始模组响应、USSD 发起/继续/取消流程以及清晰的模组错误上报。 |
 | 短信 | 蜂窝与 IMS 短信直接发送、入站同步、分段短信处理、送达报告、会话历史、未读状态、时间戳以及逐条消息的送达状态。 |
 | WiFi Calling | IKEv2/ePDG 隧道建立、EAP-AKA 鉴权、IMS 注册、IMS 短信、重连控制、状态诊断以及按设备路由。 |
@@ -52,12 +52,13 @@ Vocat 是一款面向 Quectel EC20/EC25 系列蜂窝模组的开源 Web 控制�
 
 ## 支持的硬件
 
-Vocat 面向基于高通芯片、并暴露兼容 AT、QMI、串口与 USB 网络接口的 Quectel 模组，包括：
+Vocat 面向基于高通芯片的 Quectel 模组与中移物联 ML307 系列模组，这些模组需暴露兼容的 AT、QMI、串口与 USB 网络接口，包括：
 
 - Quectel EC20
 - Quectel EC25
 - Quectel EG25 系列
 - 兼容的 EG600 及相关模组
+- 中移物联 ML307 系列（例如 ML307A-E5，及各 OEM 变体）
 
 可用功能取决于模组固件、USB 复合设备配置、SIM/eSIM 能力、主机驱动、无线网络以及运营商配置。
 
@@ -172,7 +173,7 @@ docker run -d \
 
 容器启动后打开 `http://<server-address>:7575`。必须使用主机网络，才能让 QMI 网络接口保持对 Vocat 可见；串口、QMI 控制节点、TUN 接口、网络配置以及容器启动后新增的设备则需要特权设备访问。`/dev` 绑定挂载使新的 `ttyUSB*`、`ttyACM*`、`cdc-wdm*` 和 MHI `wwan*` 节点无需重建容器即可见。
 
-该模式有意赋予 Vocat 对主机设备和网络栈的广泛访问权限，请仅在受信任的 Linux 主机上使用。自动发现会识别受支持的 Quectel USB 模组（USB 厂商 ID `2c7c`），以及通过 Linux WWAN 子系统暴露的 PCIe/MHI 模组；它不能识别任意模组布局。仅用 `--device` 映射单个节点，例如 `/dev/ttyUSB2`、`/dev/cdc-wdm0` 或 `/dev/wwan0qmi0`，会将容器限定在这些固定节点上，无法提供完整的多设备或热插拔发现。
+该模式有意赋予 Vocat 对主机设备和网络栈的广泛访问权限，请仅在受信任的 Linux 主机上使用。自动发现会识别受支持的 Quectel USB 模组（USB 厂商 ID `2c7c`）、中移物联 ML307 系列模组（按产品字符串识别），以及通过 Linux WWAN 子系统暴露的 PCIe/MHI 模组；它不能识别任意模组布局。仅用 `--device` 映射单个节点，例如 `/dev/ttyUSB2`、`/dev/cdc-wdm0` 或 `/dev/wwan0qmi0`，会将容器限定在这些固定节点上，无法提供完整的多设备或热插拔发现。
 
 在 OpenWrt 主机上，fw4 的 input 链会丢弃来自其未管理接口的新连接，其中包括 Vocat 为每个 VoWiFi 会话创建的 TUN 接口。因此 Vocat 会用镜像自带的 `nft` 插入范围很窄的 `vocat-ims-*` 放行规则（仅 P-CSCF 到协商得到的内层地址）。缺少这些规则时 IMS 注册和发短信仍然正常，但收短信和来电会被拒绝。如果镜像自带的 `nft` 无法读取主机规则集，Vocat 会记录 `nft could not inspect the OpenWrt fw4 input chain`，此时可让 `VOCAT_NFT` 指向主机自己的 nft：
 
@@ -205,6 +206,11 @@ VoCat 使用 `qmicli` 验证 QMI 控制通道是否就绪，并使用 `qmi-proxy
 
 `vocat doctor --repair-dji-qmi` 会在更改任何 USB 驱动绑定或置位 DTR 之前检查 `qmicli`。如果该工具不可用，命令会停止并给出安装提示，保持设备当前状态不变。
 
+### AT 蜂窝主机数据
+
+基于 AT 的 ECM/RNDIS 数据需要 Linux、iproute2 以及带有 `udhcpc` 的 BusyBox。
+VoCat 必须独占管理模组网络接口；请禁用该接口上竞争的 DHCP 客户端或网络管理配置。VoCat 会维护 IPv4 租约和打标策略路由，而不会更改系统默认路由或解析器配置。该路径目前需要支持 IPv4 的蜂窝服务。
+
 ## 配置
 
 Vocat 先从 `VOCAT_CONFIG` 读取可选的 JSON 配置文件，再应用 `VOCAT_*` 环境变量。环境变量优先级更高。
@@ -214,9 +220,11 @@ Vocat 先从 `VOCAT_CONFIG` 读取可选的 JSON 配置文件，再应用 `VOCAT
 | `VOCAT_ADDR` | `0.0.0.0:7575` | HTTP 监听地址。 |
 | `VOCAT_DATABASE_PATH` | `./data/vocat.db` | SQLite 数据库路径。 |
 | `VOCAT_SESSION_TTL` | `24h` | 鉴权会话有效期。 |
-| `VOCAT_SECURE_COOKIES` | `false` | 在使用 HTTPS 时将会话 Cookie 标记为安全。 |
+| `VOCAT_SECURE_COOKIES` | `false` | 可选：强制所有入口使用安全 Cookie；默认按 HTTP/HTTPS 入口自动适配。 |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | 优雅关闭超时时间。 |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | API 请求体最大字节数。 |
+| `VOCAT_MCP_ENABLED` | `true` | 在 `/mcp` 提供面向 AI Agent 的 MCP 端点。设为 `false` 可禁用。 |
+| `VOCAT_PROBE_UNKNOWN_USB` | `false` | 允许使用 AT 命令探测未识别的 USB 串口设备。探测会更改串口设置并清空输入缓存；仅当这些端口专用于模组时再启用。已验证的模组身份会自动被发现。JSON 键名：`probe_unknown_usb`。 |
 | `VOCAT_REPO` | `MengMengCode/VoCat` | 自更新器使用的受信任 GitHub 仓库，格式为 `owner/name`。 |
 | `GITHUB_TOKEN` | 空 | 可选的 GitHub token，用于私有仓库或更高的 API 限额。 |
 
@@ -236,7 +244,7 @@ VoCat 支持 Pocket ID（OpenID Connect）、GitHub.com OAuth App 和 Generic OA
 ### 配置 Pocket ID
 
 1. 为 VoCat 配置 HTTPS 根路径入口，例如 `https://vocat.example.com`，并设置
-   `VOCAT_SECURE_COOKIES=true`。在 SSO 设置选择 **Pocket ID**，公开入口初始使用当前
+   HTTPS 公开地址。Cookie 会按访问入口自动适配，无需设置 `VOCAT_SECURE_COOKIES`；该环境变量只用于强制所有入口使用安全 Cookie。在 SSO 设置选择 **Pocket ID**，公开入口初始使用当前
    浏览器访问地址，需要调整时直接编辑**VoCat 公开地址**。页面立即显示紧凑的回调 URL 和复制按钮，
    无需先保存或填写客户端凭据：
    `https://vocat.example.com/api/auth/sso/callback`。
@@ -274,6 +282,18 @@ UserInfo 通过 Bearer access token 请求；用户 ID
 默认 PKCE 为 S256。只有确实不支持 PKCE 的旧服务才使用关闭选项。
 Generic OAuth2 不提供 OIDC ID Token 验证。
 
+### 同时使用域名和内网 IP 登录
+
+同一份身份服务配置和账号绑定可用于已配置的 HTTPS 公开入口，以及 localhost、loopback 和明确的私网 IP 入口。请在身份服务登记每个入口的完整回调 URL（路径为 `/api/auth/sso/callback`）。程序按当前入口生成授权回调地址，并在 Token 交换时使用同一个地址；跨入口提交回调会被拒绝。普通公网 HTTP 地址仍不被允许。
+
+IPv6 回调地址采用浏览器压缩后的写法，IPv4 映射 IPv6 地址也使用十六进制形式。请在身份服务中登记设置页面显示的回调地址。已有的展开形式配置会自动识别，但身份服务必须允许规范化后的回调地址。
+
+直接 TLS、已配置的 HTTPS 反代入口或可信的 `X-Forwarded-Proto` 会自动启用安全 Cookie；未受信任的转发头不会参与判断，反代应保留 Host。密码会话依据请求传输方式、显式强制设置以及同源 HTTPS Origin/Referer 信息选择 Cookie 属性；浏览器信息只可加强 Cookie 保护，不参与鉴权、网络访问控制或回调地址选择。
+
+会话在登录时保存安全 Cookie 要求，之后识别到 HTTPS 时只会加强保护；即使 CSRF Cookie 丢失或失效、刷新请求又没有协议提示，补发时也会保留这个要求。数据库升级会保留已有会话；旧会话无法反推出此前的传输协议，HTTPS 用户重新登录一次或进行一次带有可识别 HTTPS 信息的刷新后，即可保存该要求。
+
+保存或关闭 SSO 不会改变密码客户端的行为。若代理剥除全部浏览器与传输协议信息，需要显式提供可信 HTTPS 标识。公开地址的推断仅用于 SSO 登录和 SSO 会话的 CSRF 刷新。独立的内网 HTTP 入口无需切换配置或重启。混合使用两种协议时请移除旧的全局 `VOCAT_SECURE_COOKIES=true` 强制设置。HTTP 入口的登录凭据会以明文传输。
+
 ### 网络、凭据与会话
 
 SSO 路由继续受现有来源网络策略限制，启用 SSO 不会将内网入口自动开放到公网。
@@ -291,8 +311,8 @@ link-local、云元数据和其他特殊用途地址。私有 CA 应安装到主
 许可相互独立。
 
 当前 Compose 使用 host network，应在实际容器内验证 DNS、路由和 CA，不假定桥接网络
-service name 可用。反代入口必须与已保存的公开 origin 一致；回调地址不从任意转发 Host
-头推导。首期只支持根路径部署。本地 Vite 开发时统一使用一个 loopback origin，例如
+service name 可用。公开域名反代入口应与已保存的公开 origin 一致；同时允许显式私网 IP 入口，
+不从任意转发 Host 头推导回调地址。首期只支持根路径部署。本地 Vite 开发时统一使用一个 loopback origin，例如
 `http://127.0.0.1:5173`，并在身份平台登记同一回调地址；IdP 出站网络例外仅用于测试 fixture。
 
 主 Session 和 CSRF Cookie 保持 `SameSite=Strict`，短期授权 Cookie 使用
@@ -327,6 +347,35 @@ WAL 模式下不能只裸拷贝正在运行的 `.db` 文件作为可靠备份。
 Docker 通过拉取镜像并重建容器升级。
 
 生产发布前，应在实际部署完成 Pocket ID Passkey/访问策略联调和升级、回滚演练。
+
+## API Token 与 MCP
+
+非浏览器客户端可以使用 Bearer Token 向相同的 `/api/...` 端点进行身份验证，无需使用浏览器的会话 Cookie 和 CSRF 流程：
+
+```bash
+vocat token create --read-only --ttl 720h ci-runner   # 仅打印一次 Token
+curl -H "Authorization: Bearer vcat_..." http://127.0.0.1:7575/api/devices
+```
+
+`vocat token list` 和 `vocat token revoke <name>` 用于管理 Token 清单。Token 拥有管理员权限；`--read-only` Token 只能发起 `GET` 请求（一个经文档记录的特例：读取短信会话会将其在本地标记为已读——规则是“不产生硬件或网络变更”）。轮换管理员密码会撤销所有 Token。请在首次执行 `bootstrap-admin` 后创建 Token。远程 Bearer 客户端还需要其来源地址在网络访问策略许可范围内；默认的 `internal` 模式仅允许私有网络。
+
+默认情况下（设置 `VOCAT_MCP_ENABLED=false` 可禁用），同一服务会在 `http://<host>:7575/mcp` 为 AI Agent 暴露一个基于 Streamable HTTP 传输和 Bearer Token 认证的 MCP（Model Context Protocol）端点。提供的工具涵盖设备状态、短信会话及受保护的发送、eSIM 配置文件列表与切换，以及 WiFi Calling 状态/重连；敏感操作（原始 AT、eSIM 下载/删除、SIM PIN、网络选择、系统更新）未暴露，且工具输出中绝不包含 IMSI、SIM PIN 或激活码。只读 Token 获取的工具列表中不包含写操作工具。短信发送遵循与 Web 界面相同的受阻目的地策略和全局每小时限额，并走蜂窝 AT 路径发送（Web 界面在启用 WiFi Calling 时的 IMS 优先路由仍保留在 Web 端，且通过 MCP 发送的短信暂未写入 Web 会话历史）。
+
+客户端配置示例（以 Claude Code 为例）：
+
+```json
+{
+  "mcpServers": {
+    "vocat": {
+      "type": "http",
+      "url": "http://192.168.1.10:7575/mcp",
+      "headers": { "Authorization": "Bearer vcat_..." }
+    }
+  }
+}
+```
+
+设计记录请参阅 [docs/API_MCP_DEVELOPMENT_PLAN.md](API_MCP_DEVELOPMENT_PLAN.md)。
 
 ## Telegram 机器人
 
@@ -471,10 +520,12 @@ cd web && npm run build
 
 参见 [LICENSE](../LICENSE)。
 
-<a href="https://star-history.dera.page/#MengMengCode/VoCat">
+## Star History
+
+<a href="https://www.star-history.com/?repos=mengmengcode%2Fvocat&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=MengMengCode/VoCat&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=MengMengCode/VoCat" />
-   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=MengMengCode/VoCat" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=mengmengcode/vocat&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=mengmengcode/vocat&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=mengmengcode/vocat&type=date&legend=top-left" />
  </picture>
 </a>
